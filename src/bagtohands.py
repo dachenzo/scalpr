@@ -50,6 +50,48 @@ class BagToHands:
             min_tracking_confidence=self.HAND_TRACKING_CONFIDENCE,
         )
 
+    # Replace single-pixel depth lookup with a small window median
+    def _get_depth_at(self, depth_image: np.ndarray, u: int, v: int, window: int = 2) -> float:
+        h, w = depth_image.shape
+        u0, u1 = max(0, u - window), min(w, u + window + 1)
+        v0, v1 = max(0, v - window), min(h, v + window + 1)
+        patch = depth_image[v0:v1, u0:u1]
+        valid = patch[patch > 0]
+        return float(np.median(valid)) if valid.size > 0 else 0.0
+    
+    # 2D landmarks + depth -> 3D joints
+    def _landmarks_to_3d(
+        self,
+        hand_landmarks,
+        depth_image: np.ndarray,
+        W: int,
+        H: int,
+        fx: float,
+        fy: float,
+        cx: float,
+        cy: float,
+    ) -> np.ndarray:
+        joints_3d = np.full((21, 3), np.nan, dtype=np.float32)
+
+        for j, lm in enumerate(hand_landmarks.landmark):
+            u = int(lm.x * W)
+            v = int(lm.y * H)
+
+            if not (0 <= u < W and 0 <= v < H):
+                continue
+
+            d_raw = self._get_depth_at(depth_image, u, v)
+            if d_raw == 0:
+                continue
+
+            d = d_raw * self.depth_scale  # meters
+            X = (u - cx) * d / fx
+            Y = (v - cy) * d / fy
+            Z = d
+            joints_3d[j] = (X, Y, Z)
+
+        return joints_3d
+
     def run(self):
         raise NotImplementedError("run() not implemented yet")
 
