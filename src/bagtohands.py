@@ -93,7 +93,97 @@ class BagToHands:
         return joints_3d
 
     def run(self):
-        raise NotImplementedError("run() not implemented yet")
+        frame_times = []
+        left_raw_positions = []
+        right_raw_positions = []
+
+        fx = self.depth_intrinsics.fx
+        fy = self.depth_intrinsics.fy
+        cx = self.depth_intrinsics.ppx
+        cy = self.depth_intrinsics.ppy
+
+        playback = self.profile.get_device().as_playback()
+        playback.set_real_time(False)
+
+        frame_idx = 0
+
+        try:
+            while True:
+                try:
+                    frames = self.pipeline.wait_for_frames(timeout_ms=self.timeout_ms)
+                except RuntimeError:
+                    break  # end of bag / timeout
+
+                if frame_idx % self.frame_stride != 0:
+                    frame_idx += 1
+                    continue
+
+                aligned_frames = self.align.process(frames)
+                depth_frame = aligned_frames.get_depth_frame()
+                color_frame = aligned_frames.get_color_frame()
+                if not depth_frame or not color_frame:
+                    frame_idx += 1
+                    continue
+
+                t_sec = depth_frame.get_timestamp() / 1000.0
+                frame_times.append(t_sec)
+
+                left_joints = np.full((21, 3), np.nan, dtype=np.float32)
+                right_joints = np.full((21, 3), np.nan, dtype=np.float32)
+
+                depth_image = np.asanyarray(depth_frame.get_data())
+                color_image = np.asanyarray(color_frame.get_data())
+                H, W, _ = color_image.shape
+
+                result = self.hands.process(color_image)
+
+                if result.multi_hand_landmarks:
+                    handedness_list = getattr(result, "multi_handedness", None)
+
+                    for i, hand_landmarks in enumerate(result.multi_hand_landmarks):
+                        label = None
+                        if handedness_list and i < len(handedness_list):
+                            label = handedness_list[i].classification[0].label  # "Left" / "Right"
+
+                        joints_3d = self._landmarks_to_3d(
+                            hand_landmarks, depth_image, W, H, fx, fy, cx, cy
+                        )
+
+                        if not np.isfinite(joints_3d).any():
+                            continue
+
+                        if label == "Left":
+                            left_joints = joints_3d
+                        elif label == "Right":
+                            right_joints = joints_3d
+                else:
+                    print(f"Frame {frame_idx}: no hand detected")
+
+                left_raw_positions.append(left_joints)
+                right_raw_positions.append(right_joints)
+
+                frame_idx += 1
+
+        finally:
+            self.pipeline.stop()
+            self.hands.close()
+
+        Path(self.left_output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.right_output_path).parent.mkdir(parents=True, exist_ok=True)
+
+        if len(frame_times) == 0:
+            print("No frames were processed; not saving output files.")
+            return
+
+        times = np.array(frame_times, dtype=np.float64)
+        left_raw = np.stack(left_raw_positions, axis=0)
+        right_raw = np.stack(right_raw_positions, axis=0)
+
+        np.savez(self.left_output_path, times=times, raw_positions=left_raw)
+        print(f"Saved {self.left_output_path} with {left_raw.shape[0]} frames")
+
+        np.savez(self.right_output_path, times=times, raw_positions=right_raw)
+        print(f"Saved {self.right_output_path} with {right_raw.shape[0]} frames")
 
 
 if __name__ == "__main__":
