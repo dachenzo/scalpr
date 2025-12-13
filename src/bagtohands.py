@@ -21,12 +21,19 @@ class BagToHands:
         right_output_path: str = "out/hand_3d_right.npz",
         frame_stride: int = 1,
         timeout_ms: int = TIMEOUT,
+        fill_mode: str = "interp",
+        interpolation_max_gap: int = 3,
     ):
         self.path = bag_path
         self.left_output_path = left_output_path
         self.right_output_path = right_output_path
         self.frame_stride = max(1, int(frame_stride))
         self.timeout_ms = max(1, int(timeout_ms))
+
+        self.fill_mode = str(fill_mode).lower()
+        if self.fill_mode not in {"interp", "none"}:
+            raise ValueError("fill_mode must be 'interp' or 'none'.")
+        self.interpolation_max_gap = max(0, int(interpolation_max_gap))
 
         # RealSense setup
         self.pipeline = rs.pipeline()
@@ -91,6 +98,36 @@ class BagToHands:
             joints_3d[j] = (X, Y, Z)
 
         return joints_3d
+    
+    @staticmethod
+    def _interpolate_short_gaps(positions: np.ndarray, max_gap: int) -> np.ndarray:
+        if positions.shape[0] <= 2 or max_gap <= 0:
+            return positions.copy()
+
+        interpolated = positions.copy()
+        T = interpolated.shape[0]
+
+        for joint_idx in range(interpolated.shape[1]):
+            joint_series = interpolated[:, joint_idx, :]
+            valid = np.all(np.isfinite(joint_series), axis=1)
+            valid_indices = np.where(valid)[0]
+            if valid_indices.size < 2:
+                continue
+
+            for start_idx, end_idx in zip(valid_indices[:-1], valid_indices[1:]):
+                gap = end_idx - start_idx - 1
+                if gap <= 0 or gap > max_gap:
+                    continue
+
+                start_val = joint_series[start_idx]
+                end_val = joint_series[end_idx]
+                for offset in range(1, gap + 1):
+                    ratio = offset / (gap + 1)
+                    joint_series[start_idx + offset] = (1.0 - ratio) * start_val + ratio * end_val
+
+            interpolated[:, joint_idx, :] = joint_series
+
+        return interpolated
 
     def run(self):
         frame_times = []
@@ -112,7 +149,7 @@ class BagToHands:
                 try:
                     frames = self.pipeline.wait_for_frames(timeout_ms=self.timeout_ms)
                 except RuntimeError:
-                    break  # end of bag / timeout
+                    break
 
                 if frame_idx % self.frame_stride != 0:
                     frame_idx += 1
@@ -143,7 +180,7 @@ class BagToHands:
                     for i, hand_landmarks in enumerate(result.multi_hand_landmarks):
                         label = None
                         if handedness_list and i < len(handedness_list):
-                            label = handedness_list[i].classification[0].label  # "Left" / "Right"
+                            label = handedness_list[i].classification[0].label
 
                         joints_3d = self._landmarks_to_3d(
                             hand_landmarks, depth_image, W, H, fx, fy, cx, cy
@@ -179,11 +216,37 @@ class BagToHands:
         left_raw = np.stack(left_raw_positions, axis=0)
         right_raw = np.stack(right_raw_positions, axis=0)
 
-        np.savez(self.left_output_path, times=times, raw_positions=left_raw)
-        print(f"Saved {self.left_output_path} with {left_raw.shape[0]} frames")
+        if self.fill_mode == "interp":
+            left_filled = self._interpolate_short_gaps(left_raw, self.interpolation_max_gap)
+            right_filled = self._interpolate_short_gaps(right_raw, self.interpolation_max_gap)
+        else:
+            left_filled = left_raw.copy()
+            right_filled = right_raw.copy()
 
-        np.savez(self.right_output_path, times=times, raw_positions=right_raw)
-        print(f"Saved {self.right_output_path} with {right_raw.shape[0]} frames")
+        # For now, "positions" is just the filled output
+        np.savez(
+            self.left_output_path,
+            times=times,
+            positions=left_filled,
+            raw_positions=left_raw,
+            filled_positions=left_filled,
+            source_frame_stride=self.frame_stride,
+            fill_mode=self.fill_mode,
+            interpolation_max_gap=self.interpolation_max_gap,
+        )
+        print(f"Saved {self.left_output_path} with {left_filled.shape[0]} frames")
+
+        np.savez(
+            self.right_output_path,
+            times=times,
+            positions=right_filled,
+            raw_positions=right_raw,
+            filled_positions=right_filled,
+            source_frame_stride=self.frame_stride,
+            fill_mode=self.fill_mode,
+            interpolation_max_gap=self.interpolation_max_gap,
+        )
+        print(f"Saved {self.right_output_path} with {right_filled.shape[0]} frames")
 
 
 if __name__ == "__main__":
