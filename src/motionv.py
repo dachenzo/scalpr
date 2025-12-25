@@ -12,26 +12,35 @@ class HandMotionVisualizer:
         npz_path: str,
         output_path: str = "hand_3d_motion.mp4",
         frame_stride: int = 2,
+        hand_label: str | None = None,
     ):
         self.npz_path = npz_path
         self.output_path = output_path
         self.frame_stride = max(1, int(frame_stride))
+        self.hand_label = (hand_label or self._infer_hand_label(npz_path)).lower()
 
-        self.point_color = "#3498db"
-        self.line_color = "#1f5fa3"
+        if self.hand_label == "left":
+            self.point_color = "#e74c3c"
+            self.line_color = "#c0392b"
+        else:
+            self.point_color = "#3498db"
+            self.line_color = "#1f5fa3"
+        self.interp_color = "#f1c40f"
 
     def run(self):
         if not Path(self.npz_path).exists():
             raise FileNotFoundError(f"Input npz not found: {self.npz_path}")
 
         with np.load(self.npz_path, allow_pickle=True) as data:
-            if "positions" in data.files:
+            keys = set(data.files)
+
+            if "positions" in keys:
                 positions = data["positions"]
-            elif "raw_positions" in data.files:
-                positions = data["raw_positions"]
             else:
-                raise KeyError("Expected 'positions' or 'raw_positions' in npz.")
+                positions = data["raw_positions"]
+
             times = data["times"]
+            raw_positions = data["raw_positions"] if "raw_positions" in keys else None
 
         T = positions.shape[0]
         if T == 0:
@@ -54,6 +63,7 @@ class HandMotionVisualizer:
 
         self._render_skeleton_video(
             positions=positions,
+            raw_positions=raw_positions,
             times=times,
             frame_indices=frame_indices,
             hand_edges=hand_edges,
@@ -64,6 +74,7 @@ class HandMotionVisualizer:
     def _render_skeleton_video(
         self,
         positions: np.ndarray,
+        raw_positions: np.ndarray | None,
         times: np.ndarray,
         frame_indices: np.ndarray,
         hand_edges: list[tuple[int, int]],
@@ -75,13 +86,22 @@ class HandMotionVisualizer:
         self._configure_3d_axes(ax, positions)
 
         scatter = ax.scatter([], [], [], s=80, c=self.point_color)
+        interp_scatter = ax.scatter([], [], [], s=95, c=self.interp_color, marker="x")
         lines = [ax.plot([], [], [], linewidth=3.0, c=self.line_color)[0] for _ in hand_edges]
 
         def update(frame_idx: int):
             P = positions[frame_idx]
             finite = np.all(np.isfinite(P), axis=1)
-
             scatter._offsets3d = (P[finite, 0], P[finite, 1], P[finite, 2])
+
+            interp_count = 0
+            if raw_positions is not None and frame_idx < raw_positions.shape[0]:
+                raw = raw_positions[frame_idx]
+                interp_mask = (~np.all(np.isfinite(raw), axis=1)) & finite
+                interp_scatter._offsets3d = (P[interp_mask, 0], P[interp_mask, 1], P[interp_mask, 2])
+                interp_count = int(interp_mask.sum())
+            else:
+                interp_scatter._offsets3d = ([], [], [])
 
             for i, (a, b) in enumerate(hand_edges):
                 if finite[a] and finite[b]:
@@ -91,14 +111,25 @@ class HandMotionVisualizer:
                     lines[i].set_data([], [])
                     lines[i].set_3d_properties([])
 
-            ax.set_title(f"Frame {frame_idx}, t={times[frame_idx]:.2f}s")
-            return [scatter, *lines]
+            ax.set_title(
+                f"{self.hand_label.title()} Frame {frame_idx}, t={times[frame_idx]:.2f}s | interp joints: {interp_count}"
+            )
+            return [scatter, interp_scatter, *lines]
 
         anim = FuncAnimation(fig, update, frames=frame_indices, interval=interval_ms, blit=False)
         Path(self.output_path).parent.mkdir(parents=True, exist_ok=True)
         anim.save(self.output_path, writer=FFMpegWriter(fps=fps))
         plt.close(fig)
         print(f"Saved animation to {self.output_path}")
+
+    @staticmethod
+    def _infer_hand_label(npz_path: str) -> str:
+        lower = npz_path.lower()
+        if "left" in lower:
+            return "left"
+        if "right" in lower:
+            return "right"
+        return "right"
 
     @staticmethod
     def _configure_3d_axes(ax, positions: np.ndarray) -> None:
