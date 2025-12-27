@@ -12,11 +12,15 @@ class HandMotionVisualizer:
         npz_path: str,
         output_path: str = "hand_3d_motion.mp4",
         frame_stride: int = 2,
+        smoothing: bool = False,
+        smoothing_alpha: float = 0.35,
         hand_label: str | None = None,
     ):
         self.npz_path = npz_path
         self.output_path = output_path
         self.frame_stride = max(1, int(frame_stride))
+        self.smoothing = bool(smoothing)
+        self.smoothing_alpha = float(np.clip(smoothing_alpha, 0.0, 1.0))
         self.hand_label = (hand_label or self._infer_hand_label(npz_path)).lower()
 
         if self.hand_label == "left":
@@ -42,6 +46,13 @@ class HandMotionVisualizer:
             times = data["times"]
             raw_positions = data["raw_positions"] if "raw_positions" in keys else None
 
+        if self.smoothing:
+            # if file doesn't already contain smoothed_positions, apply local EMA
+            if "smoothed_positions" in keys:
+                positions = data["smoothed_positions"]
+            else:
+                positions = self._smooth_positions(positions, self.smoothing_alpha)
+
         T = positions.shape[0]
         if T == 0:
             raise ValueError(f"No frames in input npz: {self.npz_path}")
@@ -58,7 +69,12 @@ class HandMotionVisualizer:
             (0, 17), (17, 18), (18, 19), (19, 20),
         ]
 
-        fps = float(np.clip(30.0 / self.frame_stride, 1.0, 60.0))
+        dt = np.diff(times[frame_indices]) if frame_indices.size > 1 else np.array([], dtype=np.float64)
+        valid_dt = dt[np.isfinite(dt) & (dt > 0)]
+        if valid_dt.size > 0:
+            fps = float(np.clip(1.0 / np.median(valid_dt), 1.0, 60.0))
+        else:
+            fps = float(np.clip(30.0 / self.frame_stride, 1.0, 60.0))
         interval_ms = int(round(1000.0 / fps))
 
         self._render_skeleton_video(
@@ -162,6 +178,21 @@ class HandMotionVisualizer:
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
         ax.set_zlabel("Z (m)")
+
+    @staticmethod
+    def _smooth_positions(positions: np.ndarray, alpha: float) -> np.ndarray:
+        if positions.shape[0] <= 1:
+            return positions
+
+        smoothed = positions.copy()
+        for t in range(1, smoothed.shape[0]):
+            prev = smoothed[t - 1]
+            curr = smoothed[t]
+            valid_curr = np.isfinite(curr)
+            valid_prev = np.isfinite(prev)
+            blend_mask = valid_curr & valid_prev
+            smoothed[t][blend_mask] = alpha * curr[blend_mask] + (1.0 - alpha) * prev[blend_mask]
+        return smoothed
 
 
 if __name__ == "__main__":
