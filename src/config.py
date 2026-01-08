@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,9 +30,11 @@ def _read_json_config(path: str | None) -> dict[str, Any]:
     return data
 
 
-def _value(cli_value: Any, cfg_value: Any, default: Any) -> Any:
+def _value(cli_value: Any, env_value: Any, cfg_value: Any, default: Any) -> Any:
     if cli_value is not None:
         return cli_value
+    if env_value is not None:
+        return env_value
     if cfg_value is not None:
         return cfg_value
     return default
@@ -51,14 +54,22 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
     args = parser.parse_args(argv)
     cfg = _read_json_config(args.config)
 
-    bag_path = _value(args.bag_path, cfg.get("bag_path"), None)
-    if not bag_path:
-        parser.error("Bag path is required. Set --bag-path or config['bag_path'].")
+    env = {
+        "bag_path": os.getenv("SCALPR_BAG_PATH"),
+        "output_dir": os.getenv("SCALPR_OUTPUT_DIR"),
+        "frame_stride": os.getenv("SCALPR_FRAME_STRIDE"),
+        "viz_frame_stride": os.getenv("SCALPR_VIZ_FRAME_STRIDE"),
+        "timeout_ms": os.getenv("SCALPR_TIMEOUT_MS"),
+    }
 
-    output_dir = _value(args.output_dir, cfg.get("output_dir"), "out")
-    frame_stride = int(_value(args.frame_stride, cfg.get("frame_stride"), 1))
-    viz_frame_stride = int(_value(args.viz_frame_stride, cfg.get("viz_frame_stride"), 2))
-    timeout_ms = int(_value(args.timeout_ms, cfg.get("timeout_ms"), 3000))
+    bag_path = _value(args.bag_path, env["bag_path"], cfg.get("bag_path"), None)
+    if not bag_path:
+        parser.error("Bag path is required. Set --bag-path or SCALPR_BAG_PATH or config['bag_path'].")
+
+    output_dir = _value(args.output_dir, env["output_dir"], cfg.get("output_dir"), "out")
+    frame_stride = int(_value(args.frame_stride, env["frame_stride"], cfg.get("frame_stride"), 1))
+    viz_frame_stride = int(_value(args.viz_frame_stride, env["viz_frame_stride"], cfg.get("viz_frame_stride"), 2))
+    timeout_ms = int(_value(args.timeout_ms, env["timeout_ms"], cfg.get("timeout_ms"), 3000))
 
     return AppConfig(
         bag_path=bag_path,
