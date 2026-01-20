@@ -150,6 +150,8 @@ def generate_run_report(
     left = _hand_metrics(left_positions)
     right = _hand_metrics(right_positions)
 
+    total_frames_read = int(max(left.total_frames, right.total_frames, len(left_times), len(right_times)))
+
     frame_count_mismatch = abs(left.total_frames - right.total_frames)
     detected_frame_mismatch = abs(left.detected_frames - right.detected_frames)
 
@@ -160,8 +162,6 @@ def generate_run_report(
         detected_frame_mismatch=detected_frame_mismatch,
         thresholds=thresholds,
     )
-
-    total_frames_read = int(max(left.total_frames, right.total_frames, len(left_times), len(right_times)))
 
     report: dict[str, Any] = {
         "summary": {
@@ -192,4 +192,51 @@ def generate_run_report(
         "warnings": warnings,
     }
 
+    # any-hand detection rate (only well-defined when frame counts align)
+    if left.total_frames == right.total_frames and left.total_frames > 0:
+        left_detected = np.any(np.all(np.isfinite(left_positions), axis=2), axis=1)
+        right_detected = np.any(np.all(np.isfinite(right_positions), axis=2), axis=1)
+        any_detected_frames = int(np.logical_or(left_detected, right_detected).sum())
+        if total_frames_read > 0:
+            report["summary"]["any_hand_detection_rate"] = float(any_detected_frames / total_frames_read)
+
     return report
+
+
+def _print_report(report: dict[str, Any]) -> None:
+    summary = report["summary"]
+    left = report["left"]
+    right = report["right"]
+
+    print("Run Quality Report")
+    print("------------------")
+    print(f"Total frames read: {summary['total_frames_read']}")
+    if "any_hand_detection_rate" in summary:
+        print(f"Any-hand detection rate: {summary['any_hand_detection_rate']:.2%}")
+    print(f"Left/right frame count mismatch: {summary['left_right_frame_count_mismatch']}")
+    print(f"Left/right detected frame mismatch: {summary['left_right_detected_frame_count_mismatch']}")
+    print(f"Status: {summary['status']}")
+    print()
+
+    print("Left hand")
+    print(f"- Detection rate: {left['hand_detection_rate']:.2%} ({left['detected_frames']} frames)")
+    print(f"- Valid-joint percentage: {left['valid_joint_percentage']:.2%}")
+    print(f"- Longest missing streak: {left['longest_missing_streak']} frames")
+    print()
+
+    print("Right hand")
+    print(f"- Detection rate: {right['hand_detection_rate']:.2%} ({right['detected_frames']} frames)")
+    print(f"- Valid-joint percentage: {right['valid_joint_percentage']:.2%}")
+    print(f"- Longest missing streak: {right['longest_missing_streak']} frames")
+
+    warnings = report.get("warnings", [])
+    if warnings:
+        print()
+        print("Warnings")
+        for warning in warnings:
+            metric = warning["metric"]
+            value = warning["value"]
+            threshold = warning["threshold"]
+            kind = warning["kind"]
+            comparator = "<" if kind == "below_min" else ">"
+            print(f"- {metric}: {value} {comparator} threshold {threshold}")
