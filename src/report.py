@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -192,7 +193,6 @@ def generate_run_report(
         "warnings": warnings,
     }
 
-    # any-hand detection rate (only well-defined when frame counts align)
     if left.total_frames == right.total_frames and left.total_frames > 0:
         left_detected = np.any(np.all(np.isfinite(left_positions), axis=2), axis=1)
         right_detected = np.any(np.all(np.isfinite(right_positions), axis=2), axis=1)
@@ -240,3 +240,50 @@ def _print_report(report: dict[str, Any]) -> None:
             kind = warning["kind"]
             comparator = "<" if kind == "below_min" else ">"
             print(f"- {metric}: {value} {comparator} threshold {threshold}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate a quality report from left/right hand NPZ outputs.")
+    parser.add_argument("--left-npz", default="out/hand_3d_left.npz", help="Path to left-hand NPZ file.")
+    parser.add_argument("--right-npz", default="out/hand_3d_right.npz", help="Path to right-hand NPZ file.")
+    parser.add_argument(
+        "--report-out",
+        default="out/run_quality_report.json",
+        help="Optional JSON report output path. Use an empty value to skip file output.",
+    )
+    parser.add_argument("--min-detection-rate", type=float, default=0.90, help="Warn if hand detection rate is below this value.")
+    parser.add_argument("--min-valid-joint-percentage", type=float, default=0.90, help="Warn if valid-joint percentage is below this value.")
+    parser.add_argument("--max-missing-streak", type=int, default=15, help="Warn if longest missing streak exceeds this value.")
+    parser.add_argument("--max-frame-count-mismatch", type=int, default=0, help="Warn if left/right frame mismatch exceeds this value.")
+    parser.add_argument("--max-detected-frame-mismatch", type=int, default=30, help="Warn if left/right detected-frame mismatch exceeds this value.")
+    args = parser.parse_args()
+
+    left_path = Path(args.left_npz)
+    right_path = Path(args.right_npz)
+
+    if not left_path.exists():
+        raise FileNotFoundError(f"Left NPZ not found: {left_path}")
+    if not right_path.exists():
+        raise FileNotFoundError(f"Right NPZ not found: {right_path}")
+
+    thresholds = QualityThresholds(
+        min_detection_rate=float(np.clip(args.min_detection_rate, 0.0, 1.0)),
+        min_valid_joint_percentage=float(np.clip(args.min_valid_joint_percentage, 0.0, 1.0)),
+        max_missing_streak=max(0, int(args.max_missing_streak)),
+        max_frame_count_mismatch=max(0, int(args.max_frame_count_mismatch)),
+        max_detected_frame_mismatch=max(0, int(args.max_detected_frame_mismatch)),
+    )
+
+    report = generate_run_report(left_path, right_path, thresholds=thresholds)
+    _print_report(report)
+
+    report_out = str(args.report_out).strip()
+    if report_out:
+        report_path = Path(report_out)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"\nSaved report JSON to {report_path}")
+
+
+if __name__ == "__main__":
+    main()
