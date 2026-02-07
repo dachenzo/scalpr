@@ -36,7 +36,7 @@ if __name__ == "__main__":
 
     repo_root = Path(__file__).resolve().parents[1]
     report_json_path = output_dir / "run_quality_report.json"
-    report_script_path = repo_root / "scripts" / "scaling.py"
+    report_script_path = repo_root / "src" / "report.py"
     subprocess.run(
         [
             sys.executable,
