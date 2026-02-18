@@ -26,6 +26,8 @@ class BagToHandsUnitTests(unittest.TestCase):
     def setUp(self) -> None:
         self.processor = BagToHands.__new__(BagToHands)
         self.processor.depth_scale = 0.001
+        self.processor.depth_min_meters = 0.08
+        self.processor.depth_max_meters = 2.5
 
     def test_get_depth_at_returns_median_of_valid_patch(self) -> None:
         depth = np.array(
@@ -39,14 +41,14 @@ class BagToHandsUnitTests(unittest.TestCase):
 
         value = BagToHands._get_depth_at(self.processor, depth, u=1, v=1, window=1)
 
-        self.assertEqual(value, 1100)
+        self.assertAlmostEqual(value, 1.1, places=6)
 
     def test_get_depth_at_returns_zero_when_patch_has_no_valid_depth(self) -> None:
         depth = np.zeros((5, 5), dtype=np.uint16)
 
         value = BagToHands._get_depth_at(self.processor, depth, u=2, v=2, window=1)
 
-        self.assertEqual(value, 0)
+        self.assertTrue(np.isnan(value))
 
     def test_landmarks_to_3d_projects_valid_landmark_and_preserves_nans(self) -> None:
         depth = np.full((10, 10), 1000, dtype=np.uint16)
@@ -70,6 +72,19 @@ class BagToHandsUnitTests(unittest.TestCase):
         self.assertEqual(joints.shape, (21, 3))
         np.testing.assert_allclose(joints[0], np.array([2.5, 2.5, 1.0], dtype=np.float32), atol=1e-6)
         self.assertTrue(np.all(np.isnan(joints[1:])))
+
+    def test_compute_spike_mask_flags_large_velocity_jump(self) -> None:
+        times = np.array([0.0, 0.1, 0.2], dtype=np.float64)
+        positions = np.full((3, 21, 3), np.nan, dtype=np.float32)
+        positions[0, 0] = np.array([0.0, 0.0, 0.5], dtype=np.float32)
+        positions[1, 0] = np.array([2.0, 0.0, 0.5], dtype=np.float32)
+        positions[2, 0] = np.array([2.1, 0.0, 0.5], dtype=np.float32)
+
+        mask = BagToHands._compute_spike_mask(positions, times, max_speed_mps=4.0)
+
+        self.assertTrue(mask[1, 0])
+        self.assertFalse(mask[2, 0])
+        self.assertEqual(int(mask.sum()), 1)
 
 
 if __name__ == "__main__":

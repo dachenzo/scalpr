@@ -15,6 +15,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from motionv import HandMotionVisualizer
 
 
+class MotionVisualizerAxisMapTests(unittest.TestCase):
+    def test_axis_map_reorders_and_flips_axes(self) -> None:
+        visualizer = HandMotionVisualizer(npz_path="dummy_right.npz", axis_map="x,z,-y")
+
+        positions = np.array([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], dtype=np.float32)
+        transformed = visualizer._apply_axis_transform(positions)
+
+        expected = np.array([[[1.0, 3.0, -2.0], [4.0, 6.0, -5.0]]], dtype=np.float32)
+        np.testing.assert_allclose(transformed, expected)
+        self.assertEqual(visualizer.axis_labels, ["Xcam", "Zcam", "-Ycam"])
+
+
 @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for MP4 smoke test")
 class MotionVisualizerSmokeTests(unittest.TestCase):
     def test_visualizer_writes_mp4_from_tiny_npz(self) -> None:
