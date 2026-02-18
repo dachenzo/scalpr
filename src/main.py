@@ -31,6 +31,9 @@ if __name__ == "__main__":
         smoothing_method=app_config.smoothing_method,
         savgol_window=app_config.savgol_window,
         savgol_polyorder=app_config.savgol_polyorder,
+        despike_max_speed_mps=app_config.despike_max_speed_mps,
+        depth_min_meters=app_config.depth_min_meters,
+        depth_max_meters=app_config.depth_max_meters,
     )
     processor.run()
 
@@ -55,6 +58,7 @@ if __name__ == "__main__":
         left_npz_path,
         left_mp4_path,
         frame_stride=app_config.viz_frame_stride,
+        axis_map=app_config.viz_axis_map,
         smoothing=app_config.smoothing,
         smoothing_alpha=app_config.smoothing_alpha,
         hand_label="left",
@@ -70,6 +74,7 @@ if __name__ == "__main__":
         right_npz_path,
         right_mp4_path,
         frame_stride=app_config.viz_frame_stride,
+        axis_map=app_config.viz_axis_map,
         smoothing=app_config.smoothing,
         smoothing_alpha=app_config.smoothing_alpha,
         hand_label="right",

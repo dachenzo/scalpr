@@ -16,6 +16,7 @@ class HandMotionVisualizer:
         frame_stride: int = 2,
         smoothing: bool = False,
         smoothing_alpha: float = 0.35,
+        axis_map: str = "x,y,z",
         hand_label: str | None = None,
         debug: bool = False,
         debug_bag_path: str | None = None,
@@ -28,6 +29,7 @@ class HandMotionVisualizer:
         self.frame_stride = max(1, int(frame_stride))
         self.smoothing = bool(smoothing)
         self.smoothing_alpha = float(np.clip(smoothing_alpha, 0.0, 1.0))
+        self.axis_transform, self.axis_labels = self._parse_axis_map(axis_map)
         self.hand_label = (hand_label or self._infer_hand_label(npz_path)).lower()
         self.debug = bool(debug)
         self.debug_bag_path = debug_bag_path
@@ -63,6 +65,10 @@ class HandMotionVisualizer:
 
         if self.smoothing and "smoothed_positions" not in data_keys:
             positions = self._smooth_positions(positions, self.smoothing_alpha)
+
+        positions = self._apply_axis_transform(positions)
+        if raw_positions is not None:
+            raw_positions = self._apply_axis_transform(raw_positions)
 
         T = positions.shape[0]
         if T == 0:
@@ -332,17 +338,17 @@ class HandMotionVisualizer:
             return "right"
         return "right"
 
-    @staticmethod
-    def _configure_3d_axes(ax, positions: np.ndarray) -> None:
+    def _configure_3d_axes(self, ax, positions: np.ndarray) -> None:
+        x_label, y_label, z_label = self.axis_labels
         finite = np.isfinite(positions)
         if not finite.any():
             ax.set_xlim(-0.2, 0.2)
             ax.set_ylim(-0.2, 0.2)
             ax.set_zlim(0.0, 0.6)
             ax.set_box_aspect([1, 1, 1])
-            ax.set_xlabel("X (m)")
-            ax.set_ylabel("Y (m)")
-            ax.set_zlabel("Z (m)")
+            ax.set_xlabel(f"{x_label} (m)")
+            ax.set_ylabel(f"{y_label} (m)")
+            ax.set_zlabel(f"{z_label} (m)")
             return
 
         all_x = positions[:, :, 0]
@@ -365,9 +371,48 @@ class HandMotionVisualizer:
         ax.set_ylim(y_mid - half, y_mid + half)
         ax.set_zlim(z_mid - half, z_mid + half)
         ax.set_box_aspect([1, 1, 1])
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
-        ax.set_zlabel("Z (m)")
+        ax.set_xlabel(f"{x_label} (m)")
+        ax.set_ylabel(f"{y_label} (m)")
+        ax.set_zlabel(f"{z_label} (m)")
+
+    @staticmethod
+    def _parse_axis_component(token: str) -> tuple[int, float, str]:
+        token = token.strip().lower()
+        sign = 1.0
+        if token.startswith("+"):
+            token = token[1:].strip()
+        elif token.startswith("-"):
+            sign = -1.0
+            token = token[1:].strip()
+
+        axis_to_index = {"x": 0, "y": 1, "z": 2}
+        if token not in axis_to_index:
+            raise ValueError("axis_map entries must be one of x, y, z with optional +/- sign.")
+
+        axis_name = token.upper()
+        label = f"{'-' if sign < 0 else ''}{axis_name}cam"
+        return axis_to_index[token], sign, label
+
+    @classmethod
+    def _parse_axis_map(cls, axis_map: str) -> tuple[list[tuple[int, float]], list[str]]:
+        parts = [part.strip() for part in str(axis_map).split(",") if part.strip()]
+        if len(parts) != 3:
+            raise ValueError("axis_map must contain exactly three comma-separated entries, e.g. 'x,z,-y'.")
+
+        parsed = [cls._parse_axis_component(part) for part in parts]
+        source_indices = [index for index, _, _ in parsed]
+        if sorted(source_indices) != [0, 1, 2]:
+            raise ValueError("axis_map must use each source axis exactly once.")
+
+        transform = [(index, sign) for index, sign, _ in parsed]
+        labels = [label for _, _, label in parsed]
+        return transform, labels
+
+    def _apply_axis_transform(self, positions: np.ndarray) -> np.ndarray:
+        transformed = np.empty_like(positions)
+        for out_axis, (source_axis, sign) in enumerate(self.axis_transform):
+            transformed[..., out_axis] = sign * positions[..., source_axis]
+        return transformed
 
     @staticmethod
     def _smooth_positions(positions: np.ndarray, alpha: float) -> np.ndarray:

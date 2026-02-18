@@ -18,6 +18,7 @@ class AppConfig:
     right_mp4_name: str = "hand_3d_motion_right.mp4"
     frame_stride: int = 1
     viz_frame_stride: int = 2
+    viz_axis_map: str = "x,y,z"
     timeout_ms: int = 3000
     smoothing: bool = False
     smoothing_alpha: float = 0.35
@@ -26,6 +27,9 @@ class AppConfig:
     smoothing_method: str = "ema"
     savgol_window: int = 7
     savgol_polyorder: int = 2
+    despike_max_speed_mps: float = 4.0
+    depth_min_meters: float = 0.08
+    depth_max_meters: float = 2.5
     debug_viz: bool = False
     left_debug_mp4_name: str = "hand_3d_motion_left_debug.mp4"
     right_debug_mp4_name: str = "hand_3d_motion_right_debug.mp4"
@@ -82,6 +86,10 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument("--right-mp4-name", help="Right-hand MP4 filename.")
     parser.add_argument("--frame-stride", type=int, help="Frame stride for bag processing.")
     parser.add_argument("--viz-frame-stride", type=int, help="Frame stride for visualization animation.")
+    parser.add_argument(
+        "--viz-axis-map",
+        help="Visualizer axis remap from camera coords, e.g. 'x,y,z' or 'x,z,-y'.",
+    )
     parser.add_argument("--timeout-ms", type=int, help="Frame read timeout in milliseconds.")
     parser.add_argument("--fill-mode", choices=["interp", "none"], help="Missing-frame handling mode.")
     parser.add_argument("--interpolation-max-gap", type=int, help="Maximum gap (frames) to linearly interpolate.")
@@ -94,6 +102,9 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
     parser.add_argument("--smoothing-method", choices=["ema", "savgol"], help="Temporal smoothing method.")
     parser.add_argument("--savgol-window", type=int, help="Savitzky-Golay odd window length.")
     parser.add_argument("--savgol-polyorder", type=int, help="Savitzky-Golay polynomial order.")
+    parser.add_argument("--despike-max-speed-mps", type=float, help="Velocity threshold (m/s) for spike rejection.")
+    parser.add_argument("--depth-min-meters", type=float, help="Minimum valid depth value in meters.")
+    parser.add_argument("--depth-max-meters", type=float, help="Maximum valid depth value in meters.")
 
     parser.add_argument("--left-debug-mp4-name", help="Left-hand debug MP4 filename.")
     parser.add_argument("--right-debug-mp4-name", help="Right-hand debug MP4 filename.")
@@ -121,6 +132,7 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
         "right_mp4_name": os.getenv("SCALPR_RIGHT_MP4_NAME"),
         "frame_stride": os.getenv("SCALPR_FRAME_STRIDE"),
         "viz_frame_stride": os.getenv("SCALPR_VIZ_FRAME_STRIDE"),
+        "viz_axis_map": os.getenv("SCALPR_VIZ_AXIS_MAP"),
         "timeout_ms": os.getenv("SCALPR_TIMEOUT_MS"),
         "fill_mode": os.getenv("SCALPR_FILL_MODE"),
         "interpolation_max_gap": os.getenv("SCALPR_INTERPOLATION_MAX_GAP"),
@@ -129,6 +141,9 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
         "smoothing_method": os.getenv("SCALPR_SMOOTHING_METHOD"),
         "savgol_window": os.getenv("SCALPR_SAVGOL_WINDOW"),
         "savgol_polyorder": os.getenv("SCALPR_SAVGOL_POLYORDER"),
+        "despike_max_speed_mps": os.getenv("SCALPR_DESPIKE_MAX_SPEED_MPS"),
+        "depth_min_meters": os.getenv("SCALPR_DEPTH_MIN_METERS"),
+        "depth_max_meters": os.getenv("SCALPR_DEPTH_MAX_METERS"),
         "debug_viz": os.getenv("SCALPR_DEBUG_VIZ"),
         "left_debug_mp4_name": os.getenv("SCALPR_LEFT_DEBUG_MP4_NAME"),
         "right_debug_mp4_name": os.getenv("SCALPR_RIGHT_DEBUG_MP4_NAME"),
@@ -154,6 +169,7 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
 
     frame_stride = int(_value(args.frame_stride, env["frame_stride"], cfg.get("frame_stride"), 1))
     viz_frame_stride = int(_value(args.viz_frame_stride, env["viz_frame_stride"], cfg.get("viz_frame_stride"), 2))
+    viz_axis_map = str(_value(args.viz_axis_map, env["viz_axis_map"], cfg.get("viz_axis_map"), "x,y,z"))
     timeout_ms = int(_value(args.timeout_ms, env["timeout_ms"], cfg.get("timeout_ms"), 3000))
     fill_mode = str(_value(args.fill_mode, env["fill_mode"], cfg.get("fill_mode"), "interp")).lower()
     interpolation_max_gap = int(
@@ -165,6 +181,16 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
     smoothing_method = str(_value(args.smoothing_method, env["smoothing_method"], cfg.get("smoothing_method"), "ema")).lower()
     savgol_window = int(_value(args.savgol_window, env["savgol_window"], cfg.get("savgol_window"), 7))
     savgol_polyorder = int(_value(args.savgol_polyorder, env["savgol_polyorder"], cfg.get("savgol_polyorder"), 2))
+    despike_max_speed_mps = float(
+        _value(
+            args.despike_max_speed_mps,
+            env["despike_max_speed_mps"],
+            cfg.get("despike_max_speed_mps"),
+            4.0,
+        )
+    )
+    depth_min_meters = float(_value(args.depth_min_meters, env["depth_min_meters"], cfg.get("depth_min_meters"), 0.08))
+    depth_max_meters = float(_value(args.depth_max_meters, env["depth_max_meters"], cfg.get("depth_max_meters"), 2.5))
 
     debug_viz = _parse_bool(_value(args.debug_viz, env["debug_viz"], cfg.get("debug_viz"), False), False)
     left_debug_mp4_name = _value(
@@ -197,6 +223,9 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
         smoothing_method = "ema"
     savgol_window = max(3, savgol_window)
     savgol_polyorder = max(1, savgol_polyorder)
+    despike_max_speed_mps = max(0.0, despike_max_speed_mps)
+    depth_min_meters = max(0.0, depth_min_meters)
+    depth_max_meters = max(depth_min_meters, depth_max_meters)
     debug_trail_length = max(2, debug_trail_length)
 
     return AppConfig(
@@ -208,6 +237,7 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
         right_mp4_name=right_mp4_name,
         frame_stride=frame_stride,
         viz_frame_stride=viz_frame_stride,
+        viz_axis_map=viz_axis_map,
         timeout_ms=timeout_ms,
         smoothing=smoothing,
         smoothing_alpha=smoothing_alpha,
@@ -216,6 +246,9 @@ def load_config(argv: list[str] | None = None) -> AppConfig:
         smoothing_method=smoothing_method,
         savgol_window=savgol_window,
         savgol_polyorder=savgol_polyorder,
+        despike_max_speed_mps=despike_max_speed_mps,
+        depth_min_meters=depth_min_meters,
+        depth_max_meters=depth_max_meters,
         debug_viz=debug_viz,
         left_debug_mp4_name=left_debug_mp4_name,
         right_debug_mp4_name=right_debug_mp4_name,

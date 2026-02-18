@@ -9,6 +9,11 @@ class BagToHands:
     HAND_DETECTION_CONFIDENCE = 0.7  # might want to lower this for some sequences
     HAND_TRACKING_CONFIDENCE = 0.5
     TIMEOUT = 3000  # ms
+    DEPTH_MIN_METERS = 0.08
+    DEPTH_MAX_METERS = 2.5
+    DEPTH_TRIM_LOW_PCT = 20.0
+    DEPTH_TRIM_HIGH_PCT = 80.0
+    DESPIKE_MAX_SPEED_MPS = 4.0
 
     """
     Process a RealSense .bag file to extract 3D hand joint positions using MediaPipe Hands.
@@ -29,6 +34,9 @@ class BagToHands:
         smoothing_method: str = "ema",
         savgol_window: int = 7,
         savgol_polyorder: int = 2,
+        despike_max_speed_mps: float = DESPIKE_MAX_SPEED_MPS,
+        depth_min_meters: float = DEPTH_MIN_METERS,
+        depth_max_meters: float = DEPTH_MAX_METERS,
     ):
         self.path = bag_path
         self.left_output_path = left_output_path
@@ -49,6 +57,9 @@ class BagToHands:
             raise ValueError("smoothing_method must be 'ema' or 'savgol'.")
         self.savgol_window = max(3, int(savgol_window))
         self.savgol_polyorder = max(1, int(savgol_polyorder))
+        self.despike_max_speed_mps = max(0.0, float(despike_max_speed_mps))
+        self.depth_min_meters = max(0.0, float(depth_min_meters))
+        self.depth_max_meters = max(self.depth_min_meters, float(depth_max_meters))
 
         self.pipeline = rs.pipeline()
         self.config = rs.config()
@@ -72,11 +83,26 @@ class BagToHands:
 
     def _get_depth_at(self, depth_image: np.ndarray, u: int, v: int, window: int = 2) -> float:
         h, w = depth_image.shape
+        if not (0 <= u < w and 0 <= v < h):
+            return float("nan")
+
         u0, u1 = max(0, u - window), min(w, u + window + 1)
         v0, v1 = max(0, v - window), min(h, v + window + 1)
-        patch = depth_image[v0:v1, u0:u1]
-        valid = patch[patch > 0]
-        return float(np.median(valid)) if valid.size > 0 else 0.0
+        patch = depth_image[v0:v1, u0:u1].astype(np.float32) * self.depth_scale
+
+        valid = np.isfinite(patch)
+        valid &= patch > self.depth_min_meters
+        valid &= patch < self.depth_max_meters
+        values = patch[valid]
+        if values.size < 3:
+            return float("nan")
+
+        lo, hi = np.percentile(values, [self.DEPTH_TRIM_LOW_PCT, self.DEPTH_TRIM_HIGH_PCT])
+        trimmed = values[(values >= lo) & (values <= hi)]
+        if trimmed.size == 0:
+            return float("nan")
+
+        return float(np.median(trimmed))
 
     def _landmarks_to_3d(
         self,
@@ -98,11 +124,11 @@ class BagToHands:
             if not (0 <= u < W and 0 <= v < H):
                 continue
 
-            d_raw = self._get_depth_at(depth_image, u, v)
-            if d_raw == 0:
+            d_m = self._get_depth_at(depth_image, u, v)
+            if not np.isfinite(d_m) or d_m <= 0:
                 continue
 
-            d = d_raw * self.depth_scale  # meters
+            d = d_m
             X = (u - cx) * d / fx
             Y = (v - cy) * d / fy
             Z = d
@@ -114,11 +140,6 @@ class BagToHands:
         frame_times = []
         left_raw_positions = []
         right_raw_positions = []
-
-        fx = self.depth_intrinsics.fx
-        fy = self.depth_intrinsics.fy
-        cx = self.depth_intrinsics.ppx
-        cy = self.depth_intrinsics.ppy
 
         playback = self.profile.get_device().as_playback()
         playback.set_real_time(False)
@@ -152,6 +173,12 @@ class BagToHands:
                 depth_image = np.asanyarray(depth_frame.get_data())
                 color_image = np.asanyarray(color_frame.get_data())
                 H, W, _ = color_image.shape
+
+                aligned_depth_intrinsics = depth_frame.profile.as_video_stream_profile().get_intrinsics()
+                fx = aligned_depth_intrinsics.fx
+                fy = aligned_depth_intrinsics.fy
+                cx = aligned_depth_intrinsics.ppx
+                cy = aligned_depth_intrinsics.ppy
 
                 result = self.hands.process(color_image)
 
@@ -200,12 +227,26 @@ class BagToHands:
         left_raw = np.stack(left_raw_positions, axis=0)
         right_raw = np.stack(right_raw_positions, axis=0)
 
+        left_spike_mask = self._compute_spike_mask(left_raw, times, self.despike_max_speed_mps)
+        right_spike_mask = self._compute_spike_mask(right_raw, times, self.despike_max_speed_mps)
+        left_despiked = self._apply_spike_mask(left_raw, left_spike_mask)
+        right_despiked = self._apply_spike_mask(right_raw, right_spike_mask)
+
+        left_spike_events = int(np.sum(left_spike_mask))
+        right_spike_events = int(np.sum(right_spike_mask))
+        if left_spike_events > 0 or right_spike_events > 0:
+            print(
+                "Despike events: "
+                f"left={left_spike_events}, right={right_spike_events}, "
+                f"max_speed={self.despike_max_speed_mps:.2f} m/s"
+            )
+
         if self.fill_mode == "interp":
-            left_filled = self._interpolate_short_gaps(left_raw, self.interpolation_max_gap)
-            right_filled = self._interpolate_short_gaps(right_raw, self.interpolation_max_gap)
+            left_filled = self._interpolate_short_gaps(left_despiked, self.interpolation_max_gap)
+            right_filled = self._interpolate_short_gaps(right_despiked, self.interpolation_max_gap)
         else:
-            left_filled = left_raw.copy()
-            right_filled = right_raw.copy()
+            left_filled = left_despiked.copy()
+            right_filled = right_despiked.copy()
 
         if self.smoothing:
             left_smoothed = self._apply_smoothing(left_filled)
@@ -214,13 +255,50 @@ class BagToHands:
             left_smoothed = left_filled.copy()
             right_smoothed = right_filled.copy()
 
+        left_post_spike_mask = self._compute_spike_mask(left_smoothed, times, self.despike_max_speed_mps)
+        right_post_spike_mask = self._compute_spike_mask(right_smoothed, times, self.despike_max_speed_mps)
+        left_final = self._apply_spike_mask(left_smoothed, left_post_spike_mask)
+        right_final = self._apply_spike_mask(right_smoothed, right_post_spike_mask)
+
+        if self.fill_mode == "interp":
+            left_final = self._interpolate_short_gaps(left_final, self.interpolation_max_gap)
+            right_final = self._interpolate_short_gaps(right_final, self.interpolation_max_gap)
+
+        left_final_guard_mask = self._compute_spike_mask(left_final, times, self.despike_max_speed_mps)
+        right_final_guard_mask = self._compute_spike_mask(right_final, times, self.despike_max_speed_mps)
+        left_final = self._apply_spike_mask(left_final, left_final_guard_mask)
+        right_final = self._apply_spike_mask(right_final, right_final_guard_mask)
+
+        left_post_spike_events = int(np.sum(left_post_spike_mask))
+        right_post_spike_events = int(np.sum(right_post_spike_mask))
+        if left_post_spike_events > 0 or right_post_spike_events > 0:
+            print(
+                "Post-smoothing despike events: "
+                f"left={left_post_spike_events}, right={right_post_spike_events}, "
+                f"max_speed={self.despike_max_speed_mps:.2f} m/s"
+            )
+
+        left_guard_events = int(np.sum(left_final_guard_mask))
+        right_guard_events = int(np.sum(right_final_guard_mask))
+        if left_guard_events > 0 or right_guard_events > 0:
+            print(
+                "Final guard despike events: "
+                f"left={left_guard_events}, right={right_guard_events}, "
+                f"max_speed={self.despike_max_speed_mps:.2f} m/s"
+            )
+
         np.savez(
             self.left_output_path,
             times=times,
-            positions=left_smoothed,
+            positions=left_final,
             raw_positions=left_raw,
+            despiked_positions=left_despiked,
+            spike_mask=left_spike_mask,
             filled_positions=left_filled,
-            smoothed_positions=left_smoothed,
+            smoothed_positions=left_final,
+            pre_post_despike_smoothed_positions=left_smoothed,
+            post_smoothing_spike_mask=left_post_spike_mask,
+            final_guard_spike_mask=left_final_guard_mask,
             source_frame_stride=self.frame_stride,
             fill_mode=self.fill_mode,
             interpolation_max_gap=self.interpolation_max_gap,
@@ -230,15 +308,20 @@ class BagToHands:
             savgol_window=self.savgol_window,
             savgol_polyorder=self.savgol_polyorder,
         )
-        print(f"Saved {self.left_output_path} with {left_smoothed.shape[0]} frames")
+        print(f"Saved {self.left_output_path} with {left_final.shape[0]} frames")
 
         np.savez(
             self.right_output_path,
             times=times,
-            positions=right_smoothed,
+            positions=right_final,
             raw_positions=right_raw,
+            despiked_positions=right_despiked,
+            spike_mask=right_spike_mask,
             filled_positions=right_filled,
-            smoothed_positions=right_smoothed,
+            smoothed_positions=right_final,
+            pre_post_despike_smoothed_positions=right_smoothed,
+            post_smoothing_spike_mask=right_post_spike_mask,
+            final_guard_spike_mask=right_final_guard_mask,
             source_frame_stride=self.frame_stride,
             fill_mode=self.fill_mode,
             interpolation_max_gap=self.interpolation_max_gap,
@@ -248,7 +331,7 @@ class BagToHands:
             savgol_window=self.savgol_window,
             savgol_polyorder=self.savgol_polyorder,
         )
-        print(f"Saved {self.right_output_path} with {right_smoothed.shape[0]} frames")
+        print(f"Saved {self.right_output_path} with {right_final.shape[0]} frames")
 
     @staticmethod
     def _smooth_positions(positions: np.ndarray, alpha: float) -> np.ndarray:
@@ -338,6 +421,33 @@ class BagToHands:
             interpolated[:, joint_idx, :] = joint_series
 
         return interpolated
+
+    @staticmethod
+    def _compute_spike_mask(positions: np.ndarray, times: np.ndarray, max_speed_mps: float) -> np.ndarray:
+        spike_mask = np.zeros((positions.shape[0], positions.shape[1]), dtype=bool)
+        if positions.shape[0] < 2 or max_speed_mps <= 0:
+            return spike_mask
+
+        dt = np.diff(times)
+        valid_dt = np.isfinite(dt) & (dt > 1e-6)
+        if not np.any(valid_dt):
+            return spike_mask
+
+        delta = np.diff(positions, axis=0)
+        speed = np.linalg.norm(delta, axis=2)
+        speed[valid_dt, :] /= dt[valid_dt, np.newaxis]
+        speed[~valid_dt, :] = np.nan
+
+        finite_speed = np.isfinite(speed)
+        spike_edges = finite_speed & (speed > max_speed_mps)
+        spike_mask[1:, :] = spike_edges
+        return spike_mask
+
+    @staticmethod
+    def _apply_spike_mask(positions: np.ndarray, spike_mask: np.ndarray) -> np.ndarray:
+        cleaned = positions.copy()
+        cleaned[spike_mask] = np.nan
+        return cleaned
 
 
 if __name__ == "__main__":
